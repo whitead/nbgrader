@@ -121,9 +121,13 @@ def check_directory(path, read=False, write=False, execute=False):
         return False
 
 def get_username():
-    """Get the username of the current process."""
+    """Get the username of the current process or environment variable JPY_UER (preferred)."""
     if pwd is None:
         raise OSError("get_username cannot be called on Windows")
+
+    jpy_uname = os.environ.get('JPY_USER')
+    if jpy_uname:
+        return jpy_uname
     return pwd.getpwuid(os.getuid())[0]
 
 def find_owner(path):
