@@ -7,7 +7,7 @@ from traitlets import List, Bool, observe
 from .baseapp import BaseNbConvertApp, nbconvert_aliases, nbconvert_flags
 from ..preprocessors import (
     AssignLatePenalties, ClearOutput, DeduplicateIds, OverwriteCells, SaveAutoGrades,
-    Execute, LimitOutput, CheckCellMetadata)
+    Execute, LimitOutput, OverwriteKernelspec, CheckCellMetadata)
 from ..api import Gradebook, MissingEntry
 from .. import utils
 
@@ -103,19 +103,20 @@ class AutogradeApp(BaseNbConvertApp):
     @property
     def _input_directory(self):
         if self._sanitizing:
-            return self.submitted_directory
+            return self.coursedir.submitted_directory
         else:
-            return self.autograded_directory
+            return self.coursedir.autograded_directory
 
     @property
     def _output_directory(self):
-        return self.autograded_directory
+        return self.coursedir.autograded_directory
 
     export_format = 'notebook'
 
     sanitize_preprocessors = List([
         ClearOutput,
         DeduplicateIds,
+        OverwriteKernelspec,
         OverwriteCells,
         CheckCellMetadata
     ])
@@ -129,74 +130,58 @@ class AutogradeApp(BaseNbConvertApp):
 
     preprocessors = List([])
 
-    @observe("config")
-    def _config_changed(self, change):
-        if 'create_student' in change['new'].AutogradeApp:
-            self.log.warn(
-                "The AutogradeApp.create_student (or the --create flag) option is "
-                "deprecated. Please specify your assignments through the "
-                "`NbGrader.db_students` variable in your nbgrader config file."
-            )
-            del change['new'].AutogradeApp.create_student
-
-        super(AutogradeApp, self)._config_changed(change)
-
     def init_assignment(self, assignment_id, student_id):
         super(AutogradeApp, self).init_assignment(assignment_id, student_id)
 
         # try to get the student from the database, and throw an error if it
         # doesn't exist
-        student = None
+        student = {}
         for s in self.db_students:
             if s['id'] == student_id:
                 student = s.copy()
                 break
 
-        if student is not None:
-            del student['id']
+        if student or self.create_student:
+            if 'id' in student:
+                del student['id']
             self.log.info("Creating/updating student with ID '%s': %s", student_id, student)
-            gb = Gradebook(self.db_url)
-            gb.update_or_create_student(student_id, **student)
-            gb.close()
+            with Gradebook(self.coursedir.db_url) as gb:
+                gb.update_or_create_student(student_id, **student)
+
         else:
-            gb = Gradebook(self.db_url)
-            try:
-                gb.find_student(student_id)
-            except MissingEntry:
-                self.fail("No student with ID '%s' exists in the database", student_id)
-            finally:
-                gb.close()
+            with Gradebook(self.coursedir.db_url) as gb:
+                try:
+                    gb.find_student(student_id)
+                except MissingEntry:
+                    self.fail("No student with ID '%s' exists in the database", student_id)
 
         # make sure the assignment exists
-        gb = Gradebook(self.db_url)
-        try:
-            gb.find_assignment(assignment_id)
-        except MissingEntry:
-            self.fail("No assignment with ID '%s' exists in the database", assignment_id)
-        finally:
-            gb.close()
+        with Gradebook(self.coursedir.db_url) as gb:
+            try:
+                gb.find_assignment(assignment_id)
+            except MissingEntry:
+                self.fail("No assignment with ID '%s' exists in the database", assignment_id)
 
         # try to read in a timestamp from file
         src_path = self._format_source(assignment_id, student_id)
-        timestamp = self._get_existing_timestamp(src_path)
-        gb = Gradebook(self.db_url)
-        if timestamp:
-            submission = gb.update_or_create_submission(
-                assignment_id, student_id, timestamp=timestamp)
-            self.log.info("%s submitted at %s", submission, timestamp)
+        timestamp = self.coursedir.get_existing_timestamp(src_path)
+        with Gradebook(self.coursedir.db_url) as gb:
+            if timestamp:
+                submission = gb.update_or_create_submission(
+                    assignment_id, student_id, timestamp=timestamp)
+                self.log.info("%s submitted at %s", submission, timestamp)
 
-            # if the submission is late, print out how many seconds late it is
-            if timestamp and submission.total_seconds_late > 0:
-                self.log.warning("%s is %s seconds late", submission, submission.total_seconds_late)
-        else:
-            submission = gb.update_or_create_submission(assignment_id, student_id)
-        gb.close()
+                # if the submission is late, print out how many seconds late it is
+                if timestamp and submission.total_seconds_late > 0:
+                    self.log.warning("%s is %s seconds late", submission, submission.total_seconds_late)
+            else:
+                submission = gb.update_or_create_submission(assignment_id, student_id)
 
         # copy files over from the source directory
         self.log.info("Overwriting files with master versions from the source directory")
         dest_path = self._format_dest(assignment_id, student_id)
-        source_path = self._format_path(self.source_directory, '.', assignment_id)
-        source_files = utils.find_all_files(source_path, self.ignore + ["*.ipynb"])
+        source_path = self.coursedir.format_path(self.coursedir.source_directory, '.', assignment_id)
+        source_files = utils.find_all_files(source_path, self.coursedir.ignore + ["*.ipynb"])
 
         # copy them to the build directory
         for filename in source_files:
@@ -210,17 +195,16 @@ class AutogradeApp(BaseNbConvertApp):
 
         # ignore notebooks that aren't in the database
         notebooks = []
-        gb = Gradebook(self.db_url)
-        for notebook in self.notebooks:
-            notebook_id = os.path.splitext(os.path.basename(notebook))[0]
-            try:
-                gb.find_notebook(notebook_id, assignment_id)
-            except MissingEntry:
-                self.log.warning("Skipping unknown notebook: %s", notebook)
-                continue
-            else:
-                notebooks.append(notebook)
-        gb.close()
+        with Gradebook(self.coursedir.db_url) as gb:
+            for notebook in self.notebooks:
+                notebook_id = os.path.splitext(os.path.basename(notebook))[0]
+                try:
+                    gb.find_notebook(notebook_id, assignment_id)
+                except MissingEntry:
+                    self.log.warning("Skipping unknown notebook: %s", notebook)
+                    continue
+                else:
+                    notebooks.append(notebook)
         self.notebooks = notebooks
         if len(self.notebooks) == 0:
             self.fail("No notebooks found, did you forget to run 'nbgrader assign'?")

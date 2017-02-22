@@ -15,6 +15,7 @@ from ..preprocessors import (
     SaveCells,
     CheckCellMetadata,
     ClearOutput,
+    ClearHiddenTests,
 )
 
 aliases = {}
@@ -36,6 +37,7 @@ flags.update({
     'no-metadata': (
         {
             'ClearSolutions': {'enforce_metadata': False},
+            'ClearHiddenTests': {'enforce_metadata': False},
             'CheckCellMetadata': {'enabled': False},
             'ComputeChecksums': {'enabled': False}
         },
@@ -46,6 +48,7 @@ flags.update({
         "Create an entry for the assignment in the database, if one does not already exist."
     ),
 })
+
 
 class AssignApp(BaseNbConvertApp):
 
@@ -87,7 +90,7 @@ class AssignApp(BaseNbConvertApp):
 
         `nbgrader assign` takes one argument (the name of the assignment), and
         looks for notebooks in the 'source' directory by default, according to
-        the directory structure specified in `NbGrader.directory_structure`.
+        the directory structure specified in `CourseDirectory.directory_structure`.
         The student version is then saved into the 'release' directory.
 
         Note that the directory structure requires the `student_id` to be given;
@@ -128,11 +131,11 @@ class AssignApp(BaseNbConvertApp):
 
     @property
     def _input_directory(self):
-        return self.source_directory
+        return self.coursedir.source_directory
 
     @property
     def _output_directory(self):
-        return self.release_directory
+        return self.coursedir.release_directory
 
     export_format = 'notebook'
 
@@ -144,66 +147,53 @@ class AssignApp(BaseNbConvertApp):
         CheckCellMetadata,
         ComputeChecksums,
         SaveCells,
-        CheckCellMetadata
+        ClearHiddenTests,
+        ComputeChecksums,
+        CheckCellMetadata,
     ])
+    # NB: ClearHiddenTests must come after ComputeChecksums and SaveCells.
+    # ComputerChecksums must come again after ClearHiddenTests.
 
     def build_extra_config(self):
         extra_config = super(AssignApp, self).build_extra_config()
-        extra_config.NbGrader.student_id = '.'
-        extra_config.NbGrader.notebook_id = '*'
+        extra_config.CourseDirectory.student_id = '.'
+        extra_config.CourseDirectory.notebook_id = '*'
         return extra_config
 
-    @observe("config")
-    def _config_changed(self, change):
-        if 'create_assignment' in change['new'].AssignApp:
-            self.log.warn(
-                "The AssignApp.create_assignment (or the --create flag) option is "
-                "deprecated. Please specify your assignments through the "
-                "`NbGrader.db_assignments` variable in your nbgrader config file."
-            )
-            del change['new'].AssignApp.create_assignment
-
-        super(AssignApp, self)._config_changed(change)
-
-
     def _clean_old_notebooks(self, assignment_id, student_id):
-        gb = Gradebook(self.db_url)
-        assignment = gb.find_assignment(assignment_id)
-        regexp = re.escape(os.path.sep).join([
-            self._format_source("(?P<assignment_id>.*)", "(?P<student_id>.*)", escape=True),
-            "(?P<notebook_id>.*).ipynb"
-        ])
+        with Gradebook(self.coursedir.db_url) as gb:
+            assignment = gb.find_assignment(assignment_id)
+            regexp = re.escape(os.path.sep).join([
+                self._format_source("(?P<assignment_id>.*)", "(?P<student_id>.*)", escape=True),
+                "(?P<notebook_id>.*).ipynb"
+            ])
 
-        # find a set of notebook ids for new notebooks
-        new_notebook_ids = set([])
-        for notebook in self.notebooks:
-            m = re.match(regexp, notebook)
-            if m is None:
-                raise RuntimeError("Could not match '%s' with regexp '%s'", notebook, regexp)
-            gd = m.groupdict()
-            if gd['assignment_id'] == assignment_id and gd['student_id'] == student_id:
-                new_notebook_ids.add(gd['notebook_id'])
+            # find a set of notebook ids for new notebooks
+            new_notebook_ids = set([])
+            for notebook in self.notebooks:
+                m = re.match(regexp, notebook)
+                if m is None:
+                    raise RuntimeError("Could not match '%s' with regexp '%s'", notebook, regexp)
+                gd = m.groupdict()
+                if gd['assignment_id'] == assignment_id and gd['student_id'] == student_id:
+                    new_notebook_ids.add(gd['notebook_id'])
 
-        # pull out the existing notebook ids
-        old_notebook_ids = set(x.name for x in assignment.notebooks)
+            # pull out the existing notebook ids
+            old_notebook_ids = set(x.name for x in assignment.notebooks)
 
-        # no added or removed notebooks, so nothing to do
-        if old_notebook_ids == new_notebook_ids:
-            gb.close()
-            return
+            # no added or removed notebooks, so nothing to do
+            if old_notebook_ids == new_notebook_ids:
+                return
 
-        # some notebooks have been removed, but there are submissions associated
-        # with the assignment, so we don't want to overwrite stuff
-        if len(assignment.submissions) > 0:
-            gb.close()
-            self.fail("Cannot modify existing assignment '%s' because there are submissions associated with it", assignment)
+            # some notebooks have been removed, but there are submissions associated
+            # with the assignment, so we don't want to overwrite stuff
+            if len(assignment.submissions) > 0:
+                self.fail("Cannot modify existing assignment '%s' because there are submissions associated with it", assignment)
 
-        # remove the old notebooks
-        for notebook_id in (old_notebook_ids - new_notebook_ids):
-            self.log.warning("Removing notebook '%s' from the gradebook", notebook_id)
-            gb.remove_notebook(notebook_id, assignment_id)
-
-        gb.close()
+            # remove the old notebooks
+            for notebook_id in (old_notebook_ids - new_notebook_ids):
+                self.log.warning("Removing notebook '%s' from the gradebook", notebook_id)
+                gb.remove_notebook(notebook_id, assignment_id)
 
     def init_assignment(self, assignment_id, student_id):
         super(AssignApp, self).init_assignment(assignment_id, student_id)
@@ -211,29 +201,27 @@ class AssignApp(BaseNbConvertApp):
         # try to get the assignment from the database, and throw an error if it
         # doesn't exist
         if not self.no_database:
-            assignment = None
+            assignment = {}
             for a in self.db_assignments:
                 if a['name'] == assignment_id:
                     assignment = a.copy()
                     break
 
-            if assignment is not None:
-                del assignment['name']
+            if assignment or self.create_assignment:
+                if 'name' in assignment:
+                    del assignment['name']
                 self.log.info("Updating/creating assignment '%s': %s", assignment_id, assignment)
-                gb = Gradebook(self.db_url)
-                gb.update_or_create_assignment(assignment_id, **assignment)
-                gb.close()
+                with Gradebook(self.coursedir.db_url) as gb:
+                    gb.update_or_create_assignment(assignment_id, **assignment)
+
             else:
-                gb = Gradebook(self.db_url)
-                try:
-                    gb.find_assignment(assignment_id)
-                except MissingEntry:
-                    self.fail("No assignment called '%s' exists in the database", assignment_id)
-                finally:
-                    gb.close()
+                with Gradebook(self.coursedir.db_url) as gb:
+                    try:
+                        gb.find_assignment(assignment_id)
+                    except MissingEntry:
+                        self.fail("No assignment called '%s' exists in the database", assignment_id)
 
             # check if there are any extra notebooks in the db that are no longer
             # part of the assignment, and if so, remove them
-            if self.notebook_id == "*":
+            if self.coursedir.notebook_id == "*":
                 self._clean_old_notebooks(assignment_id, student_id)
-

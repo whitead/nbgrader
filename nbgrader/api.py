@@ -111,6 +111,9 @@ class Notebook(Base):
     #: Unique id of :attr:`~nbgrader.api.Notebook.assignment`
     assignment_id = Column(String(32), ForeignKey('assignment.id'))
 
+    #: The json string representation of the kernelspec for this notebook
+    kernelspec = Column(String(1024), nullable=True)
+
     #: A collection of grade cells contained within this notebook, represented
     #: by :class:`~nbgrader.api.GradeCell` objects
     grade_cells = relationship("GradeCell", backref="notebook")
@@ -1027,6 +1030,12 @@ class Gradebook(object):
 
         # this creates all the tables in the database if they don't already exist
         Base.metadata.create_all(bind=self.engine)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
     def close(self):
         """Close the connection to the database.
@@ -2412,12 +2421,3 @@ class Gradebook(object):
             "failed_tests", "flagged"
         ]
         return [dict(zip(keys, x)) for x in submissions]
-
-
-@contextlib.contextmanager
-def open_gradebook(db_url):
-    gradebook = Gradebook(db_url)
-    try:
-        yield gradebook
-    finally:
-        gradebook.close()

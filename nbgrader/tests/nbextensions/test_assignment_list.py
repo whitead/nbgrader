@@ -1,15 +1,46 @@
 import pytest
 import os
-import time
+import shutil
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
+from nbformat import write as write_nb
+from nbformat.v4 import new_notebook
+from textwrap import dedent
+
 from .. import run_nbgrader
 from .conftest import notwindows
 from ...utils import rmtree
+
+
+@pytest.fixture(scope="module")
+def class_files(coursedir):
+    # copy files from the user guide
+    source_path = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "source", "user_guide", "source")
+    shutil.copytree(os.path.join(os.path.dirname(__file__), source_path), os.path.join(coursedir, "source"))
+
+    # rename to old names -- we do this rather than changing all the tests
+    # because I want the tests to operate on files with spaces in the names
+    os.rename(os.path.join(coursedir, "source", "ps1"), os.path.join(coursedir, "source", "Problem Set 1"))
+    os.rename(os.path.join(coursedir, "source", "Problem Set 1", "problem1.ipynb"), os.path.join(coursedir, "source", "Problem Set 1", "Problem 1.ipynb"))
+    os.rename(os.path.join(coursedir, "source", "Problem Set 1", "problem2.ipynb"), os.path.join(coursedir, "source", "Problem Set 1", "Problem 2.ipynb"))
+
+    # create a fake ps1
+    os.mkdir(os.path.join(coursedir, "source", "ps.01"))
+    with open(os.path.join(coursedir, "source", "ps.01", "problem 1.ipynb"), "w") as fh:
+        write_nb(new_notebook(), fh, 4)
+
+    with open("nbgrader_config.py", "a") as fh:
+        fh.write(dedent(
+            """
+            c.CourseDirectory.root = '{}'
+            """.format(coursedir)
+        ))
+
+    return coursedir
 
 
 def _wait(browser):
@@ -90,7 +121,8 @@ def _sort_rows(x):
 
 
 def _wait_until_loaded(browser):
-    _wait(browser).until(lambda browser: browser.find_element_by_css_selector("#course_list_dropdown").is_enabled())
+    _wait(browser).until(lambda browser: browser.find_element_by_id("course_list_default").text != "Loading, please wait...")
+    _wait(browser).until(EC.element_to_be_clickable((By.ID, "course_list_dropdown")))
 
 
 def _change_course(browser, course):
@@ -137,8 +169,8 @@ def test_show_assignments_list(browser, port, class_files, tempdir):
     _wait(browser).until(EC.visibility_of_element_located((By.CSS_SELECTOR, "#submitted_assignments_list_placeholder")))
 
     # release an assignment
-    run_nbgrader(["assign", "Problem Set 1"])
-    run_nbgrader(["release", "Problem Set 1", "--course", "abc101"])
+    run_nbgrader(["assign", "Problem Set 1", "--force"])
+    run_nbgrader(["release", "Problem Set 1", "--course", "abc101", "--force"])
 
     # click the refresh button
     browser.find_element_by_css_selector("#refresh_assignments_list").click()
@@ -157,8 +189,8 @@ def test_multiple_released_assignments(browser, port, class_files, tempdir):
     _wait_until_loaded(browser)
 
     # release another assignment
-    run_nbgrader(["assign", "ps.01"])
-    run_nbgrader(["release", "ps.01", "--course", "xyz 200"])
+    run_nbgrader(["assign", "ps.01", "--force"])
+    run_nbgrader(["release", "ps.01", "--course", "xyz 200", "--force"])
 
     # click the refresh button
     browser.find_element_by_css_selector("#refresh_assignments_list").click()
@@ -267,7 +299,7 @@ def test_submit_assignment_missing_notebooks(browser, port, class_files, tempdir
 
     # set strict flag
     with open('nbgrader_config.py', 'a') as config:
-        config.write('c.SubmitApp.strict = True')
+        config.write('c.ExchangeSubmit.strict = True')
 
     # submit it again
     rows = browser.find_elements_by_css_selector("#fetched_assignments_list > .list_item")
@@ -426,8 +458,8 @@ def test_missing_exchange(exchange, browser, port, class_files, tempdir):
     os.makedirs(exchange)
 
     # release an assignment
-    run_nbgrader(["assign", "Problem Set 1"])
-    run_nbgrader(["release", "Problem Set 1", "--course", "abc101"])
+    run_nbgrader(["assign", "Problem Set 1", "--force"])
+    run_nbgrader(["release", "Problem Set 1", "--course", "abc101", "--force"])
 
     # click the refresh button
     browser.find_element_by_css_selector("#refresh_assignments_list").click()

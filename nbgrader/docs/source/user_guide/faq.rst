@@ -9,16 +9,15 @@ Can I use nbgrader for purely manually graded assignments (i.e., without autogra
 
 Yes, absolutely! Mark all the cells where students write their answers as
 :ref:`manually-graded-cells` and then during grading run ``nbgrader autograde``
-and ``nbgrader formgrade`` as normal. If you don't want to even execute the
+and the formgrader as normal. If you don't want to even execute the
 notebooks, you can pass the ``--no-execute`` flag to
 :doc:`/command_line_tools/nbgrader-autograde`.
 
 Can I hide the test cells in a nbgrader assignment?
 ---------------------------------------------------
 
-Not at the moment, though it is on the todo list (see `#390
-<https://github.com/jupyter/nbgrader/issues/390>`_). :ref:`PRs welcome!
-<pull-request>`
+Yes, as of version 0.5.0 of ``nbgrader`` you will be able to hide tests
+in "Autograder tests" cells (see :ref:`autograder-tests-cell-hidden-tests`).
 
 How does nbgrader ensure that students do not change the tests?
 ---------------------------------------------------------------
@@ -62,11 +61,11 @@ database. You can access the timestamps through the API, like so:
 .. code:: python
 
     from nbgrader.api import Gradebook
-    gb = Gradebook("sqlite:///gradebook.db")
-    assignment = gb.find_assignment("ps1")
-    for submission in assignment.submissions:
-        print("Submission from '{}' is {} seconds late".format(
-            submission.student_id, submission.total_seconds_late))
+    with Gradebook("sqlite:///gradebook.db") gb:
+        assignment = gb.find_assignment("ps1")
+        for submission in assignment.submissions:
+            print("Submission from '{}' is {} seconds late".format(
+                submission.student_id, submission.total_seconds_late))
 
 Note that if you use the release/fetch/submit/collect commands (see
 :doc:`managing_assignment_files`), the ``timestamp.txt`` files will be included
@@ -114,7 +113,7 @@ in your students' ``nbgrader_config.py`` files:
 .. code:: python
 
     c = get_config()
-    c.TransferApp.path_includes_course = True
+    c.Exchange.path_includes_course = True
 
 This will tell the transfer apps (i.e. ``nbgrader fetch``, ``nbgrader submit``,
 and ``nbgrader list``) to assume that the paths for assignments include the

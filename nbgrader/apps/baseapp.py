@@ -9,32 +9,29 @@ import re
 import os
 import traceback
 import logging
-import datetime
 import shutil
 
-from dateutil.tz import gettz
 from jupyter_core.application import JupyterApp
-from jupyter_core.paths import jupyter_data_dir
 from nbconvert.exporters.export import exporter_map
 from nbconvert.nbconvertapp import NbConvertApp, DottedOrNone
 from textwrap import dedent
 from tornado.log import LogFormatter
-from traitlets import Unicode, List, Bool, Dict, Integer, observe, default
+from traitlets import Unicode, List, Bool, Dict, Integer, Instance, default
 from traitlets.config.application import catch_config_error
 from traitlets.config.loader import Config
 
-from ..utils import check_directory, parse_utc, find_all_files, full_split, rmtree, remove
+from ..utils import find_all_files, rmtree, remove
 from ..preprocessors.execute import UnresponsiveKernelError
+from ..coursedir import CourseDirectory
 
 
 nbgrader_aliases = {
     'log-level' : 'Application.log_level',
-    'student': 'NbGrader.student_id',
-    'assignment': 'NbGrader.assignment_id',
-    'notebook': 'NbGrader.notebook_id',
-    'db': 'NbGrader.db_url',
-    'course': 'NbGrader.course_id',
-    'course-dir': 'NbGrader.course_directory'
+    'student': 'CourseDirectory.student_id',
+    'assignment': 'CourseDirectory.assignment_id',
+    'notebook': 'CourseDirectory.notebook_id',
+    'db': 'CourseDirectory.db_url',
+    'course-dir': 'CourseDirectory.root'
 }
 nbgrader_flags = {
     'debug': (
@@ -110,145 +107,6 @@ class NbGrader(JupyterApp):
                 handler.close()
                 self.log.removeHandler(handler)
 
-    db_url = Unicode(
-        "",
-        help=dedent(
-            """
-            URL to the database. Defaults to sqlite:///<course_directory>/gradebook.db,
-            where <course_directory> is another configurable variable.
-            """
-        )
-    ).tag(config=True)
-
-    @default("db_url")
-    def _db_url_default(self):
-        return "sqlite:///{}".format(
-            os.path.abspath(os.path.join(self.course_directory, "gradebook.db")))
-
-    student_id = Unicode(
-        "*",
-        help=dedent(
-            """
-            File glob to match student IDs. This can be changed to filter by
-            student. Note: this is always changed to '.' when running `nbgrader
-            assign`, as the assign step doesn't have any student ID associated
-            with it.
-            """
-        )
-    ).tag(config=True)
-
-    assignment_id = Unicode(
-        "",
-        help=dedent(
-            """
-            The assignment name. This MUST be specified, either by setting the
-            config option, passing an argument on the command line, or using the
-            --assignment option on the command line.
-            """
-        )
-    ).tag(config=True)
-
-    notebook_id = Unicode(
-        "*",
-        help=dedent(
-            """
-            File glob to match notebook names, excluding the '.ipynb' extension.
-            This can be changed to filter by notebook.
-            """
-        )
-    ).tag(config=True)
-
-    directory_structure = Unicode(
-        os.path.join("{nbgrader_step}", "{student_id}", "{assignment_id}"),
-        help=dedent(
-            """
-            Format string for the directory structure that nbgrader works
-            over during the grading process. This MUST contain named keys for
-            'nbgrader_step', 'student_id', and 'assignment_id'. It SHOULD NOT
-            contain a key for 'notebook_id', as this will be automatically joined
-            with the rest of the path.
-            """
-        )
-    ).tag(config=True)
-
-    source_directory = Unicode(
-        'source',
-        help=dedent(
-            """
-            The name of the directory that contains the master/instructor
-            version of assignments. This corresponds to the `nbgrader_step`
-            variable in the `directory_structure` config option.
-            """
-        )
-    ).tag(config=True)
-
-    release_directory = Unicode(
-        'release',
-        help=dedent(
-            """
-            The name of the directory that contains the version of the
-            assignment that will be released to students. This corresponds to
-            the `nbgrader_step` variable in the `directory_structure` config
-            option.
-            """
-        )
-    ).tag(config=True)
-
-    submitted_directory = Unicode(
-        'submitted',
-        help=dedent(
-            """
-            The name of the directory that contains assignments that have been
-            submitted by students for grading. This corresponds to the
-            `nbgrader_step` variable in the `directory_structure` config option.
-            """
-        )
-    ).tag(config=True)
-
-    autograded_directory = Unicode(
-        'autograded',
-        help=dedent(
-            """
-            The name of the directory that contains assignment submissions after
-            they have been autograded. This corresponds to the `nbgrader_step`
-            variable in the `directory_structure` config option.
-            """
-        )
-    ).tag(config=True)
-
-    feedback_directory = Unicode(
-        'feedback',
-        help=dedent(
-            """
-            The name of the directory that contains assignment feedback after
-            grading has been completed. This corresponds to the `nbgrader_step`
-            variable in the `directory_structure` config option.
-            """
-        )
-    ).tag(config=True)
-
-    course_id = Unicode(
-        '',
-        help=dedent(
-            """
-            A key that is unique per instructor and course. This MUST be
-            specified, either by setting the config option, or using the
-            --course option on the command line.
-            """
-        )
-    ).tag(config=True)
-
-    course_directory = Unicode(
-        '',
-        help=dedent(
-            """
-            The root directory for the course files (that includes the `source`,
-            `release`, `submitted`, `autograded`, etc. directories). Defaults to
-            the current working directory.
-            """
-        )
-    ).tag(config=True)
-
     db_assignments = List(
         help=dedent(
             """
@@ -283,23 +141,7 @@ class NbGrader(JupyterApp):
         )
     ).tag(config=True)
 
-    @default("course_directory")
-    def _course_directory_default(self):
-        return os.getcwd()
-
-    ignore = List(
-        [
-            ".ipynb_checkpoints",
-            "*.pyc",
-            "__pycache__"
-        ],
-        help=dedent(
-            """
-            List of file names or file globs to be ignored when copying directories.
-            """
-        )
-    ).tag(config=True)
-
+    coursedir = Instance(CourseDirectory, allow_none=True)
     verbose_crash = Bool(False)
 
     # The classes added here determine how configuration will be documented
@@ -307,79 +149,110 @@ class NbGrader(JupyterApp):
 
     @default("classes")
     def _classes_default(self):
-        return [NbGrader]
+        return [NbGrader, CourseDirectory]
 
     @default("config_file_name")
     def _config_file_name_default(self):
         return u'nbgrader_config'
 
-    def _get_existing_timestamp(self, dest_path):
-        """Get the timestamp, as a datetime object, of an existing submission."""
-        timestamp_path = os.path.join(dest_path, 'timestamp.txt')
-        if os.path.exists(timestamp_path):
-            with open(timestamp_path, 'r') as fh:
-                timestamp = fh.read().strip()
-            if not timestamp:
-                self.log.warning(
-                    "Empty timestamp file: {}".format(timestamp_path))
-                return None
-            try:
-                return parse_utc(timestamp)
-            except ValueError:
-                self.fail(
-                    "Invalid timestamp string: {}".format(timestamp_path))
-        else:
-            return None
-
-    @observe("config")
-    def _config_changed(self, change):
-        new = change['new']
-
-        if 'NbGraderConfig' in new:
+    def _load_config(self, cfg, **kwargs):
+        if 'NbGraderConfig' in cfg:
             self.log.warn(
                 "Use NbGrader in config, not NbGraderConfig. Outdated config:\n%s",
                 '\n'.join(
                     'NbGraderConfig.{key} = {value!r}'.format(key=key, value=value)
-                    for key, value in new.NbGraderConfig.items()
+                    for key, value in cfg.NbGraderConfig.items()
                 )
             )
-            new.NbGrader.merge(new.NbGraderConfig)
-            del new.NbGraderConfig
+            cfg.NbGrader.merge(cfg.NbGraderConfig)
+            del cfg.NbGraderConfig
 
-        if 'BasicConfig' in new:
+        if 'BasicConfig' in cfg:
             self.log.warn(
                 "Use NbGrader in config, not BasicConfig. Outdated config:\n%s",
                 '\n'.join(
                     'BasicConfig.{key} = {value!r}'.format(key=key, value=value)
-                    for key, value in new.BasicConfig.items()
+                    for key, value in cfg.BasicConfig.items()
                 )
             )
-            new.NbGrader.merge(new.BasicConfig)
-            del new.BasicConfig
+            cfg.NbGrader.merge(cfg.BasicConfig)
+            del cfg.BasicConfig
 
-        if 'BaseNbGraderApp' in new:
+        if 'BaseNbGraderApp' in cfg:
             self.log.warn(
                 "Use NbGrader in config, not BaseNbGraderApp. Outdated config:\n%s",
                 '\n'.join(
                     'BaseNbGraderApp.{key} = {value!r}'.format(key=key, value=value)
-                    for key, value in new.BaseNbGraderApp.items()
+                    for key, value in cfg.BaseNbGraderApp.items()
                 )
             )
-            new.NbGrader.merge(new.BaseNbGraderApp)
-            del new.BaseNbGraderApp
+            cfg.NbGrader.merge(cfg.BaseNbGraderApp)
+            del cfg.BaseNbGraderApp
 
-        if 'BaseApp' in new:
+        if 'BaseApp' in cfg:
             self.log.warn(
                 "Use NbGrader in config, not BaseApp. Outdated config:\n%s",
                 '\n'.join(
                     'BaseApp.{key} = {value!r}'.format(key=key, value=value)
-                    for key, value in new.BaseApp.items()
+                    for key, value in cfg.BaseApp.items()
                 )
             )
-            new.NbGrader.merge(new.BaseApp)
-            del new.BaseApp
+            cfg.NbGrader.merge(cfg.BaseApp)
+            del cfg.BaseApp
 
-        super(NbGrader, self)._config_changed(change)
+        coursedir_options = [
+            ("student_id", "student_id"),
+            ("assignment_id", "assignment_id"),
+            ("notebook_id", "notebook_id"),
+            ("directory_structure", "directory_structure"),
+            ("source_directory", "source_directory"),
+            ("release_directory", "release_directory"),
+            ("submitted_directory", "submitted_directory"),
+            ("autograded_directory", "autograded_directory"),
+            ("feedback_directory", "feedback_directory"),
+            ("db_url", "db_url"),
+            ("course_directory", "root"),
+            ("ignore", "ignore")
+        ]
+
+        for old_opt, new_opt in coursedir_options:
+            if old_opt in cfg.NbGrader:
+                self.log.warn("Outdated config: use CourseDirectory.{} rather than NbGrader.{}".format(new_opt, old_opt))
+                setattr(cfg.CourseDirectory, new_opt, cfg.NbGrader[old_opt])
+                delattr(cfg.NbGrader, old_opt)
+
+        if "course_id" in cfg.NbGrader:
+            self.log.warn("Outdated config: use Exchange.course_id rather than NbGrader.course_id")
+            cfg.Exchange.course_id = cfg.NbGrader.course_id
+            del cfg.NbGrader.course_id
+
+        exchange_options = [
+            ("timezone", "timezone"),
+            ("timestamp_format", "timestamp_format"),
+            ("exchange_directory", "root"),
+            ("cache_directory", "cache")
+        ]
+
+        for old_opt, new_opt in exchange_options:
+            if old_opt in cfg.TransferApp:
+                self.log.warn("Outdated config: use Exchange.{} rather than TransferApp.{}".format(new_opt, old_opt))
+                setattr(cfg.Exchange, new_opt, cfg.TransferApp[old_opt])
+                delattr(cfg.TransferApp, old_opt)
+
+        if 'TransferApp' in cfg and cfg.TransferApp:
+            self.log.warn(
+                "Use Exchange in config, not TransferApp. Outdated config:\n%s",
+                '\n'.join(
+                    'TransferApp.{key} = {value!r}'.format(key=key, value=value)
+                    for key, value in cfg.TransferApp.items()
+                )
+            )
+            cfg.Exchange.merge(cfg.TransferApp)
+            del cfg.TransferApp
+
+        super(NbGrader, self)._load_config(cfg, **kwargs)
+        if self.coursedir:
+            self.coursedir._load_config(cfg)
 
     def fail(self, msg, *args):
         """Log the error msg using self.log.error and exit using sys.exit(1)."""
@@ -397,7 +270,13 @@ class NbGrader(JupyterApp):
         self.update_config(self.build_extra_config())
         if self.logfile:
             self.init_logging(logging.FileHandler, [self.logfile], color=False)
+        self.init_syspath()
+        self.coursedir = CourseDirectory(parent=self)
         super(NbGrader, self).initialize(argv)
+
+    def init_syspath(self):
+        """Add the cwd to the sys.path ($PYTHONPATH)"""
+        sys.path.insert(0, os.getcwd())
 
     def reset(self):
         # stop logging
@@ -409,23 +288,6 @@ class NbGrader(JupyterApp):
 
         # clear the instance
         self.clear_instance()
-
-    def _format_path(self, nbgrader_step, student_id, assignment_id, escape=False):
-
-        kwargs = dict(
-            nbgrader_step=nbgrader_step,
-            student_id=student_id,
-            assignment_id=assignment_id
-        )
-
-        if escape:
-            base = re.escape(self.course_directory)
-            structure = [x.format(**kwargs) for x in full_split(self.directory_structure)]
-            path = re.escape(os.path.sep).join([base] + structure)
-        else:
-            path = os.path.join(self.course_directory, self.directory_structure).format(**kwargs)
-
-        return path
 
     def load_config_file(self, **kwargs):
         """Load the config file.
@@ -442,118 +304,6 @@ class NbGrader(JupyterApp):
             self.log.warn("No nbgrader_config.py file found (rerun with --debug to see where nbgrader is looking)")
 
         super(NbGrader, self).load_config_file(**kwargs)
-
-
-# These are the aliases and flags for nbgrader apps that inherit only from
-# TransferApp
-transfer_aliases = {}
-transfer_aliases.update(nbgrader_aliases)
-transfer_aliases.update({
-    "timezone": "TransferApp.timezone",
-})
-transfer_flags = {}
-transfer_flags.update(nbgrader_flags)
-transfer_flags.update({
-})
-
-class TransferApp(NbGrader):
-    """A base class for the list, release, collect, fetch, and submit apps.
-
-    All of these apps involve transfering files between an instructor or students
-    files and the nbgrader exchange.
-    """
-
-    timezone = Unicode(
-        "UTC",
-        help="Timezone for recording timestamps"
-    ).tag(config=True)
-
-    timestamp_format = Unicode(
-        "%Y-%m-%d %H:%M:%S %Z",
-        help="Format string for timestamps"
-    ).tag(config=True)
-
-    exchange_directory = Unicode(
-        "/srv/nbgrader/exchange",
-        help="The nbgrader exchange directory writable to everyone. MUST be preexisting."
-    ).tag(config=True)
-
-    cache_directory = Unicode(
-        "",
-        help="Local cache directory for nbgrader submit and nbgrader list. Defaults to $JUPYTER_DATA_DIR/nbgrader_cache"
-    ).tag(config=True)
-
-    path_includes_course = Bool(
-        False,
-        help=dedent(
-            """
-            Whether the path for fetching/submitting  assignments should be
-            prefixed with the course name. If this is `False`, then the path
-            will be something like `./ps1`. If this is `True`, then the path
-            will be something like `./course123/ps1`.
-            """
-        )
-    ).tag(config=True)
-
-    @default("cache_directory")
-    def _cache_directory_default(self):
-        return os.path.join(jupyter_data_dir(), 'nbgrader_cache')
-
-    def set_timestamp(self):
-        """Set the timestap using the configured timezone."""
-        tz = gettz(self.timezone)
-        if tz is None:
-            self.fail("Invalid timezone: {}".format(self.timezone))
-        self.timestamp = datetime.datetime.now(tz).strftime(self.timestamp_format)
-
-    def ensure_exchange_directory(self):
-        """See if the exchange directory exists and is writable, fail if not."""
-        if not check_directory(self.exchange_directory, write=True, execute=True):
-            self.fail("Unwritable directory, please contact your instructor: {}".format(self.exchange_directory))
-
-    @catch_config_error
-    def initialize(self, argv=None):
-        if sys.platform == 'win32':
-            self.fail("Sorry, %s is not available on Windows.", self.name.replace("-", " "))
-
-        super(TransferApp, self).initialize(argv)
-        self.ensure_exchange_directory()
-        self.set_timestamp()
-
-    def init_src(self):
-        """Compute and check the source paths for the transfer."""
-        raise NotImplementedError
-
-    def init_dest(self):
-        """Compute and check the destination paths for the transfer."""
-        raise NotImplementedError
-
-    def copy_files(self):
-        """Actually do the file transfer."""
-        raise NotImplementedError
-
-    def do_copy(self, src, dest, perms=None):
-        """Copy the src dir to the dest dir omitting the self.ignore globs."""
-        shutil.copytree(src, dest, ignore=shutil.ignore_patterns(*self.ignore))
-        if perms:
-            for dirname, dirnames, filenames in os.walk(dest):
-                for filename in filenames:
-                    os.chmod(os.path.join(dirname, filename), perms)
-
-    def start(self):
-        super(TransferApp, self).start()
-
-        # set assignemnt and course
-        if len(self.extra_args) == 1:
-            self.assignment_id = self.extra_args[0]
-        elif len(self.extra_args) > 2:
-            self.fail("Too many arguments")
-        elif self.assignment_id == "":
-            self.fail("Must provide assignment name:\nnbgrader <command> ASSIGNMENT [ --course COURSE ]")
-
-        self.init_src()
-        self.init_dest()
-        self.copy_files()
 
 
 # These are the aliases and flags for nbgrade apps that inherit from BaseNbConvertApp
@@ -626,10 +376,10 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
         raise NotImplementedError
 
     def _format_source(self, assignment_id, student_id, escape=False):
-        return self._format_path(self._input_directory, student_id, assignment_id, escape=escape)
+        return self.coursedir.format_path(self._input_directory, student_id, assignment_id, escape=escape)
 
     def _format_dest(self, assignment_id, student_id, escape=False):
-        return self._format_path(self._output_directory, student_id, assignment_id, escape=escape)
+        return self.coursedir.format_path(self._output_directory, student_id, assignment_id, escape=escape)
 
     def build_extra_config(self):
         extra_config = super(BaseNbConvertApp, self).build_extra_config()
@@ -640,18 +390,18 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
         # the assignment can be set via extra args
         if len(self.extra_args) > 1:
             self.fail("Only one argument (the assignment id) may be specified")
-        elif len(self.extra_args) == 1 and self.assignment_id != "":
+        elif len(self.extra_args) == 1 and self.coursedir.assignment_id != "":
             self.fail("The assignment cannot both be specified in config and as an argument")
-        elif len(self.extra_args) == 0 and self.assignment_id == "":
+        elif len(self.extra_args) == 0 and self.coursedir.assignment_id == "":
             self.fail("An assignment id must be specified, either as an argument or with --assignment")
         elif len(self.extra_args) == 1:
-            self.assignment_id = self.extra_args[0]
+            self.coursedir.assignment_id = self.extra_args[0]
 
         self.assignments = {}
         self.notebooks = []
-        fullglob = self._format_source(self.assignment_id, self.student_id)
+        fullglob = self._format_source(self.coursedir.assignment_id, self.coursedir.student_id)
         for assignment in glob.glob(fullglob):
-            self.assignments[assignment] = glob.glob(os.path.join(assignment, self.notebook_id + ".ipynb"))
+            self.assignments[assignment] = glob.glob(os.path.join(assignment, self.coursedir.notebook_id + ".ipynb"))
             if len(self.assignments[assignment]) == 0:
                 self.fail("No notebooks were matched in '%s'", assignment)
 
@@ -681,7 +431,7 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
         resources['nbgrader']['student'] = gd['student_id']
         resources['nbgrader']['assignment'] = gd['assignment_id']
         resources['nbgrader']['notebook'] = gd['notebook_id']
-        resources['nbgrader']['db_url'] = self.db_url
+        resources['nbgrader']['db_url'] = self.coursedir.db_url
 
         return resources
 
@@ -700,7 +450,7 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
         dest = os.path.normpath(self._format_dest(assignment_id, student_id))
 
         # the destination doesn't exist, so we haven't processed it
-        if self.notebook_id == "*":
+        if self.coursedir.notebook_id == "*":
             if not os.path.exists(dest):
                 return True
         else:
@@ -713,7 +463,7 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
 
         # if we have specified --force, then always remove existing stuff
         if self.force:
-            if self.notebook_id == "*":
+            if self.coursedir.notebook_id == "*":
                 self.log.warning("Removing existing assignment: {}".format(dest))
                 rmtree(dest)
             else:
@@ -726,13 +476,13 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
             return True
 
         src = self._format_source(assignment_id, student_id)
-        new_timestamp = self._get_existing_timestamp(src)
-        old_timestamp = self._get_existing_timestamp(dest)
+        new_timestamp = self.coursedir.get_existing_timestamp(src)
+        old_timestamp = self.coursedir.get_existing_timestamp(dest)
 
         # if --force hasn't been specified, but the source assignment is newer,
         # then we want to overwrite it
         if new_timestamp is not None and old_timestamp is not None and new_timestamp > old_timestamp:
-            if self.notebook_id == "*":
+            if self.coursedir.notebook_id == "*":
                 self.log.warning("Updating existing assignment: {}".format(dest))
                 rmtree(dest)
             else:
@@ -757,7 +507,7 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
         dest = self._format_dest(assignment_id, student_id)
 
         # detect other files in the source directory
-        for filename in find_all_files(source, self.ignore + ["*.ipynb"]):
+        for filename in find_all_files(source, self.coursedir.ignore + ["*.ipynb"]):
             # Make sure folder exists.
             path = os.path.join(dest, os.path.relpath(filename, source))
             if not os.path.exists(os.path.dirname(path)):
@@ -771,7 +521,7 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
         self.log.info("Setting destination file permissions to %s", self.permissions)
         dest = os.path.normpath(self._format_dest(assignment_id, student_id))
         permissions = int(str(self.permissions), 8)
-        for dirname, dirnames, filenames in os.walk(dest):
+        for dirname, _, filenames in os.walk(dest):
             for filename in filenames:
                 os.chmod(os.path.join(dirname, filename), permissions)
 
@@ -780,7 +530,7 @@ class BaseNbConvertApp(NbGrader, NbConvertApp):
 
         def _handle_failure(gd):
             dest = os.path.normpath(self._format_dest(gd['assignment_id'], gd['student_id']))
-            if self.notebook_id == "*":
+            if self.coursedir.notebook_id == "*":
                 if os.path.exists(dest):
                     self.log.warning("Removing failed assignment: {}".format(dest))
                     rmtree(dest)

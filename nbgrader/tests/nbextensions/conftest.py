@@ -12,9 +12,6 @@ from selenium import webdriver
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from textwrap import dedent
 
-from nbformat import write as write_nb
-from nbformat.v4 import new_notebook
-
 from .. import copy_coverage_files, get_free_ports
 from ...utils import rmtree
 
@@ -89,59 +86,43 @@ def cache(request):
 
 
 @pytest.fixture(scope="module")
-def class_files(coursedir):
-    # copy files from the user guide
-    source_path = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "source", "user_guide", "source")
-    shutil.copytree(os.path.join(os.path.dirname(__file__), source_path), os.path.join(coursedir, "source"))
-
-    # rename to old names -- we do this rather than changing all the tests
-    # because I want the tests to operate on files with spaces in the names
-    os.rename(os.path.join(coursedir, "source", "ps1"), os.path.join(coursedir, "source", "Problem Set 1"))
-    os.rename(os.path.join(coursedir, "source", "Problem Set 1", "problem1.ipynb"), os.path.join(coursedir, "source", "Problem Set 1", "Problem 1.ipynb"))
-    os.rename(os.path.join(coursedir, "source", "Problem Set 1", "problem2.ipynb"), os.path.join(coursedir, "source", "Problem Set 1", "Problem 2.ipynb"))
-
-    # create a fake ps1
-    os.mkdir(os.path.join(coursedir, "source", "ps.01"))
-    with open(os.path.join(coursedir, "source", "ps.01", "problem 1.ipynb"), "w") as fh:
-        write_nb(new_notebook(), fh, 4)
-
-    return coursedir
-
-
-@pytest.fixture(scope="module")
 def port():
     nbserver_port, = get_free_ports(1)
     return nbserver_port
 
 
 @pytest.fixture(scope="module")
-def nbserver(request, port, tempdir, coursedir, jupyter_config_dir, jupyter_data_dir, exchange, cache):
+def nbserver(request, port, tempdir, jupyter_config_dir, jupyter_data_dir, exchange, cache):
     env = os.environ.copy()
     env['JUPYTER_CONFIG_DIR'] = jupyter_config_dir
     env['JUPYTER_DATA_DIR'] = jupyter_data_dir
     env['HOME'] = tempdir
 
-    sp.Popen([sys.executable, "-m", "jupyter", "nbextension", "install", "--user", "--py", "nbgrader"], env=env)
-    sp.Popen([sys.executable, "-m", "jupyter", "nbextension", "enable", "--user", "--py", "nbgrader"], env=env)
-    sp.Popen([sys.executable, "-m", "jupyter", "serverextension", "enable", "--user", "--py", "nbgrader"], env=env)
+    sp.check_call([sys.executable, "-m", "jupyter", "nbextension", "install", "--user", "--py", "nbgrader"], env=env)
+    sp.check_call([sys.executable, "-m", "jupyter", "nbextension", "enable", "--user", "--py", "nbgrader"], env=env)
+    sp.check_call([sys.executable, "-m", "jupyter", "serverextension", "enable", "--user", "--py", "nbgrader"], env=env)
 
     # create nbgrader_config.py file
-    if sys.platform != 'win32':
-        with open('nbgrader_config.py', 'w') as fh:
+    with open('nbgrader_config.py', 'w') as fh:
+        fh.write(dedent(
+            """
+            c = get_config()
+            c.Execute.execute_retries = 4
+            c.NbGrader.db_assignments = [dict(name="Problem Set 1"), dict(name="ps.01")]
+            c.NbGrader.db_students = [
+                dict(id="Bitdiddle", first_name="Ben", last_name="B"),
+                dict(id="Hacker", first_name="Alyssa", last_name="H"),
+                dict(id="Reasoner", first_name="Louis", last_name="R")
+            ]
+            """
+        ))
+
+        if sys.platform != 'win32':
             fh.write(dedent(
                 """
-                c = get_config()
-                c.TransferApp.exchange_directory = '{}'
-                c.TransferApp.cache_directory = '{}'
-                c.Execute.execute_retries = 4
-                c.NbGrader.course_directory = '{}'
-                c.NbGrader.db_assignments = [dict(name="Problem Set 1"), dict(name="ps.01")]
-                c.NbGrader.db_students = [
-                    dict(id="Bitdiddle", first_name="Ben", last_name="B"),
-                    dict(id="Hacker", first_name="Alyssa", last_name="H"),
-                    dict(id="Reasoner", first_name="Louis", last_name="R")
-                ]
-                """.format(exchange, cache, coursedir)
+                c.Exchange.root = "{}"
+                c.Exchange.cache = "{}"
+                """.format(exchange, cache)
             ))
 
     kwargs = dict(env=env)
@@ -152,7 +133,11 @@ def nbserver(request, port, tempdir, coursedir, jupyter_config_dir, jupyter_data
         sys.executable, "-m", "jupyter", "notebook",
         "--no-browser",
         "--NotebookApp.token=''",  # Notebook >=4.3
-        "--port", str(port)], **kwargs)
+        "--port", str(port),
+        "--log-level=DEBUG"], **kwargs)
+
+    # wait for a few seconds to allow the notebook server to finish starting
+    time.sleep(5)
 
     def fin():
         if sys.platform == 'win32':
@@ -191,7 +176,7 @@ def browser(request, tempdir, nbserver):
     capabilities = DesiredCapabilities.PHANTOMJS
     capabilities['loggingPrefs'] = {'browser': 'ALL'}
     browser = webdriver.PhantomJS(
-        service_args=['--cookies-file=/dev/null'],
+        service_args=['--cookies-file=/dev/null', '--proxy-type=none'],
         desired_capabilities=capabilities,
         service_log_path=os.path.devnull)
     browser.set_page_load_timeout(30)
@@ -205,9 +190,10 @@ def browser(request, tempdir, nbserver):
                 print(message)
             print("<------------------------------------------>")
         browser.save_screenshot(os.path.join(os.path.dirname(__file__), 'selenium.screenshot.png'))
+        browser.service.process.send_signal(signal.SIGTERM)
         browser.quit()
-    request.addfinalizer(fin)
 
+    request.addfinalizer(fin)
     return browser
 
 

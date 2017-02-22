@@ -2,7 +2,6 @@ from .baseapp import NbGrader, BaseNbConvertApp
 from .assignapp import AssignApp
 from .autogradeapp import AutogradeApp
 from .feedbackapp import FeedbackApp
-from .notebookapp import FormgradeNotebookApp
 from .formgradeapp import FormgradeApp
 from .validateapp import ValidateApp
 from .releaseapp import ReleaseApp
@@ -18,6 +17,7 @@ from .dbapp import (
     DbStudentAddApp, DbStudentRemoveApp, DbStudentImportApp, DbStudentListApp,
     DbAssignmentAddApp, DbAssignmentRemoveApp, DbAssignmentImportApp, DbAssignmentListApp)
 from .updateapp import UpdateApp
+from .zipcollectapp import ZipCollectApp
 from .nbgraderapp import NbGraderApp
 
 
@@ -28,7 +28,6 @@ __all__ = [
     'AutogradeApp',
     'FeedbackApp',
     'FormgradeApp',
-    'FormgradeNotebookApp',
     'ValidateApp',
     'ReleaseApp',
     'CollectApp',
@@ -49,5 +48,6 @@ __all__ = [
     'DbAssignmentImportApp',
     'DbAssignmentRemoveApp',
     'DbAssignmentListApp',
-    'UpdateApp'
+    'UpdateApp',
+    'ZipCollectApp',
 ]

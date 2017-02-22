@@ -1,3 +1,5 @@
+from traitlets import List
+
 from .. import utils
 from ..api import Gradebook
 from . import NbGraderPreprocessor
@@ -5,6 +7,8 @@ from . import NbGraderPreprocessor
 
 class GetGrades(NbGraderPreprocessor):
     """Preprocessor for saving grades from the database to the notebook"""
+
+    display_data_priority = List(['text/html', 'application/pdf', 'text/latex', 'image/svg+xml', 'image/png', 'image/jpeg', 'text/plain'], config=True)
 
     def preprocess(self, nb, resources):
         # pull information from the resources
@@ -16,7 +20,7 @@ class GetGrades(NbGraderPreprocessor):
         # connect to the database
         self.gradebook = Gradebook(self.db_url)
 
-        try:
+        with self.gradebook:
             # process the cells
             nb, resources = super(GetGrades, self).preprocess(nb, resources)
             notebook = self.gradebook.find_submission_notebook(
@@ -30,9 +34,6 @@ class GetGrades(NbGraderPreprocessor):
             resources['nbgrader']['score'] = notebook.score - late_penalty
             resources['nbgrader']['max_score'] = notebook.max_score
             resources['nbgrader']['late_penalty'] = late_penalty
-
-        finally:
-            self.gradebook.close()
 
         return nb, resources
 
